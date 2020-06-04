@@ -8,6 +8,7 @@ import tempfile
 import subprocess
 import contextlib
 import datetime
+import json
 
 # Third-party dependency
 import six
@@ -49,6 +50,18 @@ def captured_output():
         yield sys.stdout, sys.stderr
     finally:
         sys.stdout, sys.stderr = old_out, old_err
+
+
+def CustomWidget(parent=None):
+    """
+    Wrap CustomWidget class into a function to avoid global Qt import
+    """
+    from Qt import QtWidgets
+
+    class Widget(QtWidgets.QWidget):
+        pass
+
+    return Widget(parent)
 
 
 self = sys.modules[__name__]
@@ -197,6 +210,38 @@ qdockwidget_ui = u"""\
 """
 
 
+qcustomwidget_ui = u"""\
+<?xml version="1.0" encoding="UTF-8"?>
+<ui version="4.0">
+ <class>MainWindow</class>
+ <widget class="QMainWindow" name="MainWindow">
+  <property name="geometry">
+   <rect>
+    <x>0</x>
+    <y>0</y>
+    <width>238</width>
+    <height>44</height>
+   </rect>
+  </property>
+  <property name="windowTitle">
+   <string>MainWindow</string>
+  </property>
+  <widget class="CustomWidget" name="customwidget">
+  </widget>
+ </widget>
+ <customwidgets>
+  <customwidget>
+   <class>CustomWidget</class>
+   <extends>QWidget</extends>
+   <header>tests.h</header>
+  </customwidget>
+ </customwidgets>
+ <resources/>
+ <connections/>
+</ui>
+"""
+
+
 def setup():
     """Module-wide initialisation
 
@@ -216,6 +261,8 @@ def setup():
     self.ui_qmainwindow = saveUiFile("qmainwindow.ui", qmainwindow_ui)
     self.ui_qdialog = saveUiFile("qdialog.ui", qdialog_ui)
     self.ui_qdockwidget = saveUiFile("qdockwidget.ui", qdockwidget_ui)
+    self.ui_qcustomwidget = saveUiFile("qcustomwidget.ui", qcustomwidget_ui)
+
 
 def teardown():
     shutil.rmtree(self.tempdir)
@@ -346,6 +393,26 @@ def test_load_ui_dockwidget():
 
     assert hasattr(win, 'lineEdit'), \
         "loadUi could not load instance to main window"
+
+    app.exit()
+
+
+def test_load_ui_customwidget():
+    """Tests to see if loadUi loads a custom widget properly"""
+    import sys
+    from Qt import QtWidgets, QtCompat
+
+    app = QtWidgets.QApplication(sys.argv)
+    win = QtWidgets.QMainWindow()
+
+    QtCompat.loadUi(self.ui_qcustomwidget, win)
+
+    # Ensure that the derived class was properly created
+    # and not the base class (in case of failure)
+    custom_class_name = getattr(win, "customwidget", None).__class__.__name__
+    excepted_class_name = CustomWidget(win).__class__.__name__
+    assert custom_class_name == excepted_class_name, \
+        "loadUi could not load custom widget to main window"
 
     app.exit()
 
@@ -484,6 +551,10 @@ def test_vendoring():
     shutil.copy(os.path.join(os.path.dirname(__file__), "Qt.py"),
                 os.path.join(vendor, "Qt.py"))
 
+    # Copy real Qt.py into the root folder
+    shutil.copy(os.path.join(os.path.dirname(__file__), "Qt.py"),
+                os.path.join(self.tempdir, "Qt.py"))
+
     print("Testing relative import..")
     assert subprocess.call(
         [sys.executable, "-c", "import myproject"],
@@ -506,6 +577,77 @@ def test_vendoring():
         cwd=self.tempdir,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
+    ) == 0
+
+    #
+    # Test invalid json data
+    #
+    env = os.environ.copy()
+    env["QT_PREFERRED_BINDING_JSON"] = '{"Qt":["PyQt5","PyQt4"],}'
+
+    cmd = "import myproject.vendor.Qt;"
+    cmd += "import Qt;"
+    cmd += "assert myproject.vendor.Qt.__binding__ != 'None', 'vendor';"
+    cmd += "assert Qt.__binding__ != 'None', 'Qt';"
+
+    popen = subprocess.Popen(
+        [sys.executable, "-c", cmd],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        cwd=self.tempdir,
+        env=env
+    )
+
+    out, err = popen.communicate()
+
+    if popen.returncode != 0:
+        print(out)
+        msg = "An exception was raised"
+        assert popen.returncode == 0, msg
+
+    error_check = b"Qt.py [warning]:"
+    assert err.startswith(error_check), err
+
+    print('out------------------')
+    print(out)
+
+    print('err ------------------')
+    print(err)
+
+    # Check QT_PREFERRED_BINDING_JSON works as expected
+    print("Testing QT_PREFERRED_BINDING_JSON is respected..")
+    cmd = "import myproject.vendor.Qt;"
+    # Check that the "None" binding was set for `import myproject.vendor.Qt`
+    cmd += "assert myproject.vendor.Qt.__binding__ == 'None', 'vendor';"
+    cmd += "import Qt;"
+    # Check that the "None" binding was not set for `import Qt`.
+    # This should be PyQt5 or PyQt4 depending on the test environment.
+    cmd += "assert Qt.__binding__ != 'None', 'Qt'"
+
+    # If the module name is "Qt" use PyQt5 or PyQt4, otherwise use None binding
+    env = os.environ.copy()
+    env["QT_PREFERRED_BINDING_JSON"] = json.dumps(
+        {
+            "Qt": ["PyQt5", "PyQt4"],
+            "default": ["None"]
+        }
+    )
+
+    assert subprocess.call(
+        [sys.executable, "-c", cmd],
+        stdout=subprocess.PIPE,
+        cwd=self.tempdir,
+        env=env
+    ) == 0
+
+    print("Testing QT_PREFERRED_BINDING_JSON and QT_PREFERRED_BINDING work..")
+    env["QT_PREFERRED_BINDING_JSON"] = '{"Qt":["PyQt5","PyQt4"]}'
+    env["QT_PREFERRED_BINDING"] = "None"
+    assert subprocess.call(
+        [sys.executable, "-c", cmd],
+        stdout=subprocess.PIPE,
+        cwd=self.tempdir,
+        env=env
     ) == 0
 
 
@@ -726,6 +868,29 @@ def test_membership():
     )
 
 
+def test_missing():
+    """Missing members of Qt.py have been defined with placeholders"""
+    import Qt
+
+    missing_members = Qt._missing_members.copy()
+
+    missing = list()
+    for module, members in missing_members.items():
+
+        mod = getattr(Qt, module)
+        missing.extend(
+            member for member in members
+            if not hasattr(mod, member) or
+            not isinstance(getattr(mod, member), Qt.MissingMember)
+        )
+
+    binding = Qt.__binding__
+    assert not missing, (
+        "Some members did not exist in {binding} as "
+        "a Qt.MissingMember type\n{missing}".format(**locals())
+    )
+
+
 if sys.version_info <= (3, 4):
     # PySide is not available for Python > 3.4
     # Shiboken(1) doesn't support Python 3.5
@@ -782,6 +947,14 @@ if sys.version_info <= (3, 4):
 
         finally:
             app.exit()
+
+    def test_isValid():
+        """.isValid and .delete work in all bindings"""
+        from Qt import QtCompat, QtCore
+        obj = QtCore.QObject()
+        assert QtCompat.isValid(obj)
+        QtCompat.delete(obj)
+        assert not QtCompat.isValid(obj)
 
 
 if binding("PyQt4"):
